@@ -147,8 +147,17 @@ function onInvest(id, min) {
   if (min > 0 && cooling(s)) { const c0 = cur(s), nv = c0 + (s.idx - c0) * 0.5; rec = Math.round(nv) - Math.round(c0); s.idx = nv; s.idxDate = today(); setHist(s, nv); s.recovering = today(); }
   if (min > 0) s.lastInv = today();
   s.sinceMin = Math.max(0, s.sinceMin + min);
+  applyBoost(s);
   return rec;
 }
+function boostFor(s, tm) { if (tm <= 0) return 0; if (!s.goal) return 0.003 * Math.min(1, tm / 60); const p = Math.min(1, tm / s.goal); return 0.004 * p + (p >= 1 ? 0.002 : 0); }
+function applyBoost(s) {
+  const t = today(), target = boostFor(s, loggedToday(s.id)), prev = s.boost && s.boost.d === t ? s.boost.v : 0;
+  if (Math.abs(target - prev) < 1e-9) return;
+  const nv = cur(s) * (1 + target) / (1 + prev); s.idx = nv; s.idxDate = t; setHist(s, nv); s.boost = { d: t, v: target };
+}
+const gp = v => { const p = v - 100; return `${p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(1)}%`; };
+const ix = v => (Math.round(v * 10) / 10).toFixed(1);
 function dateLabel(d) { const n = days(d, today()); if (n === 0) return 'Today'; if (n === 1) return 'Yesterday'; if (n < 7) return WD[new Date(pd(d)).getUTCDay()].slice(0, 3); const x = new Date(pd(d)); return `${x.getUTCDate()} ${MO[x.getUTCMonth()]}`; }
 function sinceLabel(d) { const n = days(d, today()); if (n === 0) return 'earlier today'; if (n === 1) return 'yesterday'; if (n < 7) return WD[new Date(pd(d)).getUTCDay()]; return `${n} days ago`; }
 function toast(msg) { U.toast = msg; render(); clearTimeout(toast.t); toast.t = setTimeout(() => { U.toast = null; render(); }, 2600); }
@@ -204,46 +213,60 @@ function returnsView() {
   const wv = d => keys.reduce((a, s) => a + valueAt(s, d) * wt(s), 0) / wSum;
   const ser = Array.from({ length: 12 }, (_, i) => wv(addDays(t, -(11 - i) * 7)));
   const gNow = keys.reduce((a, s) => a + cur(s) * wt(s), 0) / wSum, dec = keys.some(cooling);
-  const lo = Math.min(98, gNow, ...ser) - 2, hi = Math.max(gNow, ...ser) + 2, y = v => 100 - (v - lo) / (hi - lo) * 100;
-  const P = (v, i) => `${(i / 12 * 300).toFixed(1)},${y(v).toFixed(1)}`;
-  const solid = ser.map(P); if (!dec) solid.push(P(gNow, 12));
-  const dash = dec ? `${P(ser[11], 11)} ${P(gNow, 12)}` : '';
-  const area = `0,100 ${solid.join(' ')} ${dec ? P(gNow, 12) + ' ' : ''}300,100`;
-  const lc = sel ? sel.color : '#1FA8CD', gTr = pct(gNow, wv(addDays(t, -30))), gStart = pct(gNow, 100);
+  const ids = sel ? [sel.id] : [...S.sips.map(s => s.id), 'misc'];
+  const wk = Array.from({ length: 12 }, (_, i) => { const hi = addDays(t, -(11 - i) * 7), lo = addDays(hi, -6);
+    return S.entries.filter(e => ids.includes(e.sip) && e.date >= lo && e.date <= hi).reduce((a, e) => a + e.min, 0) / 60; });
+  wk[11] += S.run && ids.includes(S.run.sip) ? runMin() / 60 : 0;
+  const wMax = Math.max(1, ...wk), totH = keys.reduce((a, s) => a + totalMin(s.id), 0) + (sel ? 0 : totalMin('misc'));
+  const lo = Math.min(99, gNow, ...ser) - 1, hi = Math.max(101, gNow, ...ser) + 1, y = v => 4 + (1 - (v - lo) / (hi - lo)) * 56;
+  const X = i => (i + 0.5) / 12 * 300;
+  const pts = ser.map((v, i) => `${X(i).toFixed(1)},${y(v).toFixed(1)}`); pts[11] = `${X(11).toFixed(1)},${y(dec ? ser[11] : gNow).toFixed(1)}`;
+  const lc = sel ? sel.color : '#1FA8CD', barC = sel ? `color-mix(in oklch, ${sel.color} 45%, #fff)` : '#C9E9F3';
+  const gTr = (gNow / wv(addDays(t, -30)) - 1) * 100, trS = `${gTr >= 0 ? '+' : '−'}${Math.abs(gTr).toFixed(1)}%`;
+  const nChecks = S.journal.filter(j => keys.some(s => s.id === j.sip)).length;
   const selCool = sel && cooling(sel);
-  const sub = selCool ? `No ${esc(sel.name)} for ${gapOf(sel).gap} days. Your ${esc(sel.signal)} is easing from ${Math.round(sel.idx)} to ${Math.round(gNow)}. One session stops it.`
-    : sel ? `${fmt(totalMin(sel.id))} of ${esc(sel.name)} moved your ${esc(sel.signal)} from 100 to ${Math.round(gNow)}.`
-    : dec ? `${sign(gStart)} since you started. Dashed: estimated wear on areas you've been away from.` : `${sign(gStart)} since you started. Weighted by the time you put into each area.`;
+  const sub = selCool ? `No ${esc(sel.name)} for ${gapOf(sel).gap} days, so it's easing down. One session stops it.`
+    : dec ? 'Dashed: estimated wear on areas you\'ve been away from.'
+    : `Grows with every day you invest, faster on days you hit a goal. ${nChecks} check-in${nChecks === 1 ? '' : 's'} so far.`;
   let h = `<div class="chips"><button class="chip ${!sel ? 'on' : ''}" data-a="sel" data-id="">All</button>${S.sips.map(s => `<button class="chip ${sel && sel.id === s.id ? 'on' : ''}" data-a="sel" data-id="${s.id}"><span>${s.emoji}</span>${esc(s.name)}</button>`).join('')}</div>
-  <div class="px" style="padding-top:22px;display:flex;flex-direction:column;gap:6px"><div class="eyebrow">${sel ? `${esc(sel.name)} index · ${esc(sel.signal)}` : 'Portfolio index'}</div>
-  <div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:48px;font-weight:700;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums">${Math.round(gNow)}</span><span style="font-size:15px;font-weight:600;color:${gTr >= 0 ? '#3D8575' : '#8A2018'}">${sign(gTr)} this month</span></div><div class="muted">${sub}</div></div>
-  <div class="px" style="padding-top:16px;display:flex;flex-direction:column;gap:6px"><div style="position:relative;height:110px"><svg viewBox="0 0 300 100" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;overflow:visible">
+  <div class="px" style="padding-top:22px;display:flex;flex-direction:column;gap:6px"><div class="eyebrow">${sel ? `${esc(sel.name)} · ${esc(sel.signal)}` : 'Portfolio'}</div>
+  <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span style="font-size:48px;font-weight:700;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums">${ix(gNow)}</span><span style="font-size:15px;font-weight:600;color:${gNow >= 100 ? '#3D8575' : '#8A2018'}">${gp(gNow)} since start</span></div>
+  <div style="font-size:13px;font-weight:500;color:#485863">${fmt(totH)} invested</div>
+  <div class="muted">${sub} <span style="font-weight:600;color:${gTr >= 0 ? '#3D8575' : '#8A2018'}">${trS}</span> in the last 30 days.</div></div>
+  <div class="px" style="padding-top:18px;display:flex;flex-direction:column;gap:6px">
+  <div style="position:relative;height:150px">
+  <div style="position:absolute;left:0;right:0;bottom:0;height:70px;display:flex;align-items:flex-end;gap:4px">${wk.map((v, i) => `<div style="flex:1;height:${v ? Math.max(4, v / wMax * 100) : 0}%;border-radius:4px 4px 1px 1px;background:${barC};opacity:${i === 11 ? 1 : 0.8}"></div>`).join('')}</div>
+  <svg viewBox="0 0 300 64" preserveAspectRatio="none" style="position:absolute;left:0;right:0;top:0;width:100%;height:96px;overflow:visible">
   <line x1="0" y1="${y(100).toFixed(1)}" x2="300" y2="${y(100).toFixed(1)}" stroke="#C3CAD0" stroke-width="1" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/>
-  <polygon points="${area}" fill="${lc}" fill-opacity="0.1"/><polyline points="${solid.join(' ')}" fill="none" stroke="${lc}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-  ${dash ? `<polyline points="${dash}" fill="none" stroke="${lc}" stroke-width="2.5" stroke-dasharray="4 4" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` : ''}</svg>
-  <div style="position:absolute;left:0;top:${y(100)}%;transform:translateY(-120%);font-size:11px;color:#6B7983">100 · where you started</div></div>
-  <div style="display:flex;justify-content:space-between;font-size:11px;color:#6B7983"><span>12 weeks ago</span><span>${dec ? 'Now (estimated)' : 'Now'}</span></div></div>`;
+  <polyline points="${pts.join(' ')}" fill="none" stroke="${lc}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+  ${dec ? `<polyline points="${X(11).toFixed(1)},${y(ser[11]).toFixed(1)} 300,${y(gNow).toFixed(1)}" fill="none" stroke="${lc}" stroke-width="2.5" stroke-dasharray="4 4" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` : ''}</svg>
+  <div style="position:absolute;right:0;top:${y(100) / 64 * 96}px;transform:translateY(-120%);font-size:11px;color:#6B7983">100 · start</div>
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:11px;color:#6B7983"><span>12 weeks ago</span><span style="display:flex;gap:12px"><span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:2.5px;border-radius:2px;background:${lc}"></span>Growth</span><span style="display:flex;align-items:center;gap:5px"><span style="width:8px;height:8px;border-radius:2px;background:${barC}"></span>Hours / week</span></span><span>${dec ? 'Now (est.)' : 'Now'}</span></div></div>`;
   const J = S.journal.filter(j => !sel || j.sip === sel.id);
   if (!sel) {
     h += `<div class="px" style="padding-top:14px;display:flex;flex-direction:column">` + S.sips.map(s => {
-      const tr = pct(cur(s), valueAt(s, addDays(t, -30))), cool = cooling(s), rec = s.recovering === t;
-      const sb = cool ? `Cooling · ${gapOf(s).gap} days away` : rec ? 'Recovering · back today' : `${fmt(totalMin(s.id))} in · ${esc(s.signal)}`;
-      return `<button class="row" data-a="sel" data-id="${s.id}"><span style="font-size:20px;width:26px;text-align:center">${s.emoji}</span><span style="flex:1;display:flex;flex-direction:column;min-width:0"><span style="font-size:16px;font-weight:600">${esc(s.name)}</span><span style="font-size:13px;font-weight:${cool || rec ? 500 : 300};color:${cool ? '#6F4408' : rec ? '#3D8575' : '#6B7983'}">${sb}</span></span><span style="font-size:13px;font-weight:600;color:${tr >= 0 ? '#3D8575' : '#8A2018'}">${sign(tr)}</span><span style="font-size:20px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;width:44px;text-align:right">${Math.round(cur(s))}</span></button>`;
+      const cool = cooling(s), rec = s.recovering === t, c = cur(s);
+      const sb = cool ? `Cooling · ${gapOf(s).gap} days away` : rec ? 'Recovering · back today' : `${fmt(totalMin(s.id))} invested`;
+      return `<button class="row" data-a="sel" data-id="${s.id}"><span style="font-size:20px;width:26px;text-align:center">${s.emoji}</span><span style="flex:1;display:flex;flex-direction:column;min-width:0"><span style="font-size:16px;font-weight:600">${esc(s.name)}</span><span style="font-size:13px;font-weight:${cool || rec ? 500 : 300};color:${cool ? '#6F4408' : rec ? '#3D8575' : '#6B7983'}">${sb}</span></span><span style="font-size:13px;font-weight:600;color:${c >= 100 ? '#3D8575' : '#8A2018'}">${gp(c)}</span><span style="font-size:18px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;width:54px;text-align:right">${ix(c)}</span></button>`;
     }).join('') + `</div>`;
   } else {
     const tally = {}; J.forEach(j => (j.tags || []).forEach(x => tally[x] = (tally[x] || 0) + 1));
     const tl = Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 4), tMax = tl.length ? tl[0][1] : 1;
-    const third = sel.countable ? [fmt(sel.saved), 'time saved'] : [sign(pct(cur(sel), valueAt(sel, addDays(t, -30)))), 'this month'];
+    const metD = new Set(), dd = {}; S.entries.filter(e => e.sip === sel.id && e.date >= addDays(t, -29)).forEach(e => dd[e.date] = (dd[e.date] || 0) + e.min);
+    const active = Object.keys(dd).length, met = sel.goal ? Object.values(dd).filter(m => m >= sel.goal).length : null;
+    const third = sel.countable ? [fmt(sel.saved), 'time saved'] : sel.goal ? [`${met}/30`, 'days goal met'] : [`${active}/30`, 'days active'];
     h += `<div class="px" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding-top:16px"><div class="stat"><span style="font-size:17px;font-weight:700">${fmt(totalMin(sel.id))}</span><span style="font-size:12px;font-weight:300;color:#6B7983">invested</span></div><div class="stat"><span style="font-size:17px;font-weight:700">${J.length}</span><span style="font-size:12px;font-weight:300;color:#6B7983">check-ins</span></div><div class="stat"><span style="font-size:17px;font-weight:700">${third[0]}</span><span style="font-size:12px;font-weight:300;color:#6B7983">${third[1]}</span></div></div>`;
     if (tl.length) h += `<div class="px eyebrow" style="padding-top:20px">What it gives you most</div><div class="px" style="display:flex;flex-direction:column;gap:8px;padding-top:10px">${tl.map(([l, n]) => `<div style="display:flex;align-items:center;gap:10px"><span style="width:120px;font-size:13px;font-weight:500">${esc(l)}</span><div style="flex:1;height:8px;border-radius:4px;background:#EEF1F3;overflow:hidden"><div style="height:100%;width:${n / tMax * 100}%;background:${sel.color};border-radius:4px"></div></div><span style="width:24px;text-align:right;font-size:13px;font-weight:600;color:#485863">${n}</span></div>`).join('')}</div>`;
     h += `<div class="px" style="padding-top:18px"><button class="btn-o" style="width:100%;height:48px;font-size:15px" data-a="check" data-id="${sel.id}">Check in on ${esc(sel.name)}</button></div>`;
   }
-  h += `<div class="px eyebrow" style="padding-top:26px">${sel ? `${esc(sel.name)} · history` : 'Recent check-ins'}</div><div class="px" style="display:flex;flex-direction:column;gap:10px;padding-top:12px">`;
+  h += `<div class="px" style="padding-top:22px;font-size:12px;font-weight:300;line-height:1.5;color:#6B7983;text-wrap:pretty">Every area starts at 100. Each day you invest grows it: up to +0.3% for time without a goal, +0.4% as you close in on a goal, +0.6% on days you meet it. Check-ins adjust it by what you feel. Idle days wear it down.</div>`;
+  h += `<div class="px eyebrow" style="padding-top:22px">${sel ? `${esc(sel.name)} · history` : 'Recent check-ins'}</div><div class="px" style="display:flex;flex-direction:column;gap:10px;padding-top:12px">`;
   h += J.length ? J.slice(0, 30).map(j => {
     const s = sipById(j.sip) || { emoji: '•', signal: '', name: '' }, r = RATE[j.rate] || RATE[1];
     const text = [j.tags && j.tags.length ? j.tags.join('. ') + '.' : '', j.note].filter(Boolean).join(' ') || `${cap1(s.signal)} ${r.l.toLowerCase()}.`;
     return `<div class="card"><span style="font-size:16px;line-height:1.3">${s.emoji}</span><div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;font-weight:500;text-wrap:pretty">${esc(text)}</span><span style="font-size:12px;font-weight:300;color:#6B7983">${dateLabel(j.date)} · ${esc(s.signal)} ${r.l.toLowerCase()}${j.amt ? ` · ${fmt(j.amt)} saved` : ''}</span></div></div>`;
-  }).join('') : `<div class="muted">No check-ins yet. They appear after ${S.checkH}h invested in an area, or every ${S.checkD} days.</div>`;
+  }).join('') : `<div class="muted">No check-ins yet. They appear after ${S.checkH}h invested in an area, or every ${S.checkD} days. Or tap an area above and check in now.</div>`;
   return h + `</div>`;
 }
 
@@ -284,8 +307,8 @@ function checkSheet(sh) {
   if (sh.step === 'done') {
     const inv = fmt(totalMin(s.id));
     const title = sh.d > 0 ? "It's compounding." : sh.d === 0 ? 'Holding steady.' : 'Noted. Dips happen.';
-    const line = sh.d >= 0 ? `${inv} of ${esc(s.name)} has moved your ${esc(s.signal)} from 100 to ${Math.round(sh.to)}.` : `${esc(s.name)} is at ${Math.round(sh.to)}. One dip doesn't undo ${inv}.`;
-    return `<div class="eyebrow">${esc(s.name)} index</div><div style="display:flex;align-items:baseline;gap:12px"><span style="font-size:22px;font-weight:600;color:#96A1A9">${Math.round(sh.from)}</span><span style="font-size:22px;color:#96A1A9">→</span><span style="font-size:52px;font-weight:700;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums">${Math.round(sh.to)}</span></div>
+    const line = sh.d >= 0 ? `${inv} invested in ${esc(s.name)} so far. ${esc(s.name)} is at ${ix(sh.to)}, ${gp(sh.to)} since you started.` : `${esc(s.name)} is at ${ix(sh.to)}. One dip doesn't undo ${inv}.`;
+    return `<div class="eyebrow">${s.emoji} ${esc(s.name)} index</div><div style="display:flex;align-items:baseline;gap:12px"><span style="font-size:22px;font-weight:600;color:#96A1A9">${ix(sh.from)}</span><span style="font-size:22px;color:#96A1A9">→</span><span style="font-size:52px;font-weight:700;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums">${ix(sh.to)}</span></div>
     <div style="font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1.2">${title}</div><div style="font-size:16px;font-weight:500;line-height:1.5;color:#2E3E48;text-wrap:pretty">${line}</div><div style="font-size:14px;font-weight:300;color:#6B7983">Next check-in after ${S.checkH}h more, or in ${S.checkD} days.</div><button class="btn" data-a="close">Keep investing</button>`;
   }
   const { gap } = gapOf(s), hasJ = S.journal.some(j => j.sip === s.id);
@@ -331,7 +354,8 @@ function act(a, id, v) {
       S.entries.push({ id: uid(), sip: r.sip, date: dstr(new Date(r.start)), start: r.start, end: Date.now(), min: Math.round(m * 10) / 10, kind: 'timer' });
       const rec = onInvest(r.sip, m), after = todayMin(r.sip);
       persist();
-      toast(sp.goal && before < sp.goal && after >= sp.goal ? `${sp.emoji} ${sp.name} goal met · ${fmt(after)} today` : rec > 0 ? `${sp.emoji} ${sp.name} recovering · +${rec}` : `${sp.emoji} +${fmt(m)} into ${sp.name}`);
+      const nowIx = sp.id !== 'misc' ? ` · ${ix(cur(sp))}` : '';
+      toast(sp.goal && before < sp.goal && after >= sp.goal ? `${sp.emoji} ${sp.name} goal met · growing faster today${nowIx}` : rec > 0 ? `${sp.emoji} ${sp.name} recovering` : `${sp.emoji} +${fmt(m)} into ${sp.name}${nowIx}`);
       return;
     }
     case 'retro': openRetro(); break;
